@@ -178,6 +178,11 @@
       <h2 class="sec-title" id="trendingTitle">Trending Today</h2>
       <div class="sl" id="trendList"><div class="skeleton-row"></div></div>
     </div>
+
+    <div class="sec">
+      <h2 class="sec-title">Popular Right Now (Zeon Music users)</h2>
+      <div class="sl" id="popularList"><div class="empty-hint">Be the first to play something!</div></div>
+    </div>
   </section>
 
   <!-- SETTINGS -->
@@ -201,6 +206,14 @@
       <h2 class="sec-title">Favorite Artists</h2>
       <div class="cr artist-grid-row" id="settingsArtistsRow"></div>
       <button class="btn-secondary settings-btn" onclick="openOnboardModal()">Edit favorite artists</button>
+    </div>
+
+    <div class="sec">
+      <h2 class="sec-title">Backup &amp; Restore</h2>
+      <p class="modal-sub">Save your liked songs, history, and playlists as a file — or bring them back from one</p>
+      <button class="btn-secondary settings-btn" onclick="exportUserData()">Export My Data</button>
+      <button class="btn-secondary settings-btn" onclick="document.getElementById('importFileInput').click()">Import Data</button>
+      <input type="file" id="importFileInput" accept="application/json" style="display:none;" onchange="importUserData(event)">
     </div>
 
     <div class="sec">
