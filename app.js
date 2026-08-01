@@ -1,7 +1,7 @@
 /* ===================== ZEON MUSIC — APP.JS (ES5 ONLY) ===================== */
 /* No arrow functions, no const/let, no template literals, no destructuring. */
 
-var API_BASE = "https://zeon-music.onrender.com";
+var API_BASE = "http://localhost:5000";
 
 var state = {
   queue: [],
@@ -24,7 +24,11 @@ var state = {
   pendingAuthEmail: "",
   onboardLang: "tamil",
   onboardSelected: [],
-  autoplayLoading: false
+  autoplayLoading: false,
+  radioQueue: [],
+  syncedLyrics: null,
+  lastLyricLineIdx: -1,
+  prevActiveLyricIdx: -1
 };
 
 var audioEl = null;
@@ -67,6 +71,7 @@ function initApp() {
 
   // Instant suggestions on open — nobody should land on an empty home screen
   loadTrending();
+  loadPopular();
   loadHomeAiRecs();
 
   toast("Zeon Music ready");
@@ -197,6 +202,7 @@ function verifySession() {
     greetSession();
     renderFavArtists();
     loadTrending();
+  loadPopular();
 
     if (!state.session.displayName) {
       setTimeout(openProfileSetupModal, 400);
@@ -413,6 +419,52 @@ function renderSettingsScreen() {
   }
 }
 
+/* ---------------- BACKUP & RESTORE ---------------- */
+function exportUserData() {
+  var payload = {
+    exportedAt: new Date().toISOString(),
+    liked: state.liked,
+    history: state.history,
+    playlists: state.playlists,
+    downloads: state.downloads
+  };
+  var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "zeon-music-backup.json";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast("Backup downloaded");
+}
+
+function importUserData(evt) {
+  var file = evt.target.files && evt.target.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function () {
+    var data = null;
+    try { data = JSON.parse(reader.result); } catch (e) { data = null; }
+    if (!data) {
+      toast("Invalid backup file");
+      return;
+    }
+    if (data.liked) { state.liked = data.liked; saveLiked(); renderLikedList(); }
+    if (data.history) { state.history = data.history; saveHist(); renderHistList(); }
+    if (data.playlists) { state.playlists = data.playlists; savePls(); }
+    if (data.downloads) {
+      state.downloads = data.downloads;
+      try { localStorage.setItem("zeon_downloads", JSON.stringify(state.downloads)); } catch (e) {}
+      renderDlList();
+    }
+    toast("Backup restored");
+  };
+  reader.readAsText(file);
+  evt.target.value = "";
+}
+
 /* ---------------- LANGUAGE-AWARE TRENDING (Instagram/Spotify-feed style) ---------------- */
 function getDominantLanguage() {
   if (!state.session || !state.session.artists || state.session.artists.length === 0) {
@@ -479,7 +531,7 @@ var artistSearchSeq = 0;
 
 function doOnboardSearch(q) {
   var container = document.getElementById("onboardSearchResults");
-  fetchJSON(API_BASE + "/api/search/artists?q=" + encodeURIComponent(q), function (ok, data) {
+  fetchJSON(API_BASE + "/api/search/artists?q=" + encodeURIComponent(q) + "&language=" + encodeURIComponent(state.onboardLang), function (ok, data) {
     if (!ok || !data || !data.results || data.results.length === 0) {
       container.innerHTML = '<span class="empty-hint">No artists found</span>';
       return;
@@ -553,6 +605,7 @@ function finishOnboarding() {
     toast("Your taste profile is ready!");
     renderFavArtists();
     loadTrending();
+  loadPopular();
     loadHomeAiRecs();
     renderSettingsScreen();
   });
@@ -661,13 +714,11 @@ function loadHomeAiRecs() {
   var container = document.getElementById("aiHomeRecs");
   if (!container) return;
   var body = {
-    mood: state.aiMood,
-    language: state.aiLang,
     liked: state.liked,
     history: state.history,
     favorite_artists: getFavoriteArtistNames()
   };
-  postJSON(API_BASE + "/api/mood-mix", body, function (ok, data) {
+  postJSON(API_BASE + "/api/recommend", body, function (ok, data) {
     if (!ok) {
       container.innerHTML = '<div class="empty-hint">Backend not reachable — make sure py app.py is running</div>';
       return;
@@ -790,8 +841,12 @@ function rowClick(evt, el) {
 function playSong(song) {
   state.currentSong = song;
   state.isPlaying = true;
+  state.syncedLyrics = null;
+  state.lastLyricLineIdx = -1;
+  state.prevActiveLyricIdx = -1;
   updatePlayerUI(song);
   addToHistory(song);
+  trackPlay(song);
 
   var streamEndpoint = song.src === "yt"
     ? API_BASE + "/api/stream/yt/" + song.id
@@ -809,7 +864,38 @@ function playSong(song) {
   loadSimilar(song);
 }
 
+function trackPlay(song) {
+  // Fire-and-forget — this is what powers "Popular Right Now" across everyone
+  // using the app, not just this browser's own history.
+  postJSON(API_BASE + "/api/track-play", {
+    id: song.id,
+    title: song.title,
+    artist: song.artist,
+    thumbnail: song.thumbnail,
+    src: song.src
+  }, function () {});
+}
+
+function loadPopular() {
+  var container = document.getElementById("popularList");
+  if (!container) return;
+  fetchJSON(API_BASE + "/api/popular?limit=20", function (ok, data) {
+    if (!ok) {
+      container.innerHTML = '<div class="empty-hint">Backend not reachable — make sure py app.py is running</div>';
+      return;
+    }
+    if (!data || !data.results || data.results.length === 0) {
+      container.innerHTML = '<div class="empty-hint">Be the first to play something!</div>';
+      return;
+    }
+    renderSongList(container, data.results, true);
+  });
+}
+
 function updatePlayerUI(song) {
+  var miniPlayer = document.getElementById("miniPlayer");
+  if (miniPlayer) miniPlayer.className = "player on";
+
   document.getElementById("ptit").textContent = song.title || "Untitled";
   document.getElementById("part").textContent = song.artist || "Unknown artist";
   document.getElementById("pth").src = song.thumbnail || "";
@@ -846,27 +932,33 @@ function togglePlay() {
 }
 
 function next() {
-  if (state.queue.length === 0) {
-    autoplayMore(function () { next(); });
-    return;
-  }
-  if (state.shuffle) {
-    state.queueIndex = Math.floor(Math.random() * state.queue.length);
-  } else {
-    state.queueIndex = state.queueIndex + 1;
-    if (state.queueIndex >= state.queue.length) {
-      // Reached the end — keep the feed going, Instagram/Spotify-radio style
-      autoplayMore(function () {
-        state.queueIndex = state.queue.length - 1 >= 0 ? state.queueIndex : 0;
-        if (state.queue.length > 0) {
-          state.queueIndex = state.queueIndex % state.queue.length;
-          playSong(state.queue[state.queueIndex]);
-        }
-      });
+  if (state.queue.length > 0) {
+    if (state.shuffle) {
+      state.queueIndex = Math.floor(Math.random() * state.queue.length);
+    } else {
+      state.queueIndex = state.queueIndex + 1;
+    }
+    if (state.queueIndex < state.queue.length) {
+      playSong(state.queue[state.queueIndex]);
       return;
     }
+    // ran off the end of the manual queue — fall through to radio continuation
   }
-  playSong(state.queue[state.queueIndex]);
+  playFromRadioQueue();
+}
+
+function playFromRadioQueue() {
+  if (state.radioQueue.length > 0) {
+    var song = state.radioQueue.shift();
+    playSong(song);
+    return;
+  }
+  autoplayMore(function () {
+    if (state.radioQueue.length > 0) {
+      var song = state.radioQueue.shift();
+      playSong(song);
+    }
+  });
 }
 
 function prev() {
@@ -876,8 +968,9 @@ function prev() {
   playSong(state.queue[state.queueIndex]);
 }
 
-/* Auto-continue the queue with personalized picks once it runs out —
-   based on liked songs + history, same idea as an Instagram/Spotify feed. */
+/* Auto-continue playback with personalized picks once the user's own queue
+   runs out — kept in a separate radioQueue so it never shows up in (or
+   clutters) the Queue panel, which only reflects what you explicitly added. */
 function autoplayMore(cb) {
   if (state.autoplayLoading) return;
   state.autoplayLoading = true;
@@ -886,12 +979,7 @@ function autoplayMore(cb) {
   postJSON(API_BASE + "/api/recommend", body, function (ok, data) {
     state.autoplayLoading = false;
     if (ok && data && data.results && data.results.length > 0) {
-      for (var i = 0; i < data.results.length; i++) {
-        state.queue.push(data.results[i]);
-      }
-      document.getElementById("qBadge").textContent = state.queue.length;
-      document.getElementById("queueCount").textContent = state.queue.length;
-      renderQ();
+      state.radioQueue = data.results;
       if (cb) cb();
     } else {
       toast("Couldn't find more songs — pick a mood to keep going");
@@ -927,6 +1015,7 @@ function bindAudioEvents() {
     document.getElementById("fspCt").textContent = fmtTime(audioEl.currentTime);
     document.getElementById("pdt").textContent = fmtTime(audioEl.duration);
     document.getElementById("fspDt").textContent = fmtTime(audioEl.duration);
+    updateSyncedLyricsHighlight();
   });
   audioEl.addEventListener("ended", function () {
     if (state.repeatMode === "one") {
@@ -1240,17 +1329,79 @@ function openLyrics() {
   document.getElementById("rpanelTitle").textContent = "Lyrics";
   showLyricsTab();
   document.getElementById("rpanel").className = "rpanel on";
+  state.syncedLyrics = null;
   if (!state.currentSong) return;
   var url = API_BASE + "/api/lyrics?title=" + encodeURIComponent(state.currentSong.title) + "&artist=" + encodeURIComponent(state.currentSong.artist);
   var lbody = document.getElementById("lbody");
   lbody.innerHTML = '<div class="empty-hint">Loading lyrics...</div>';
   fetchJSON(url, function (ok, data) {
-    if (ok && data && data.lyrics) {
-      lbody.innerHTML = "<p>" + escapeHtml(data.lyrics).replace(/\n/g, "<br>") + "</p>";
-    } else {
+    if (!ok || !data || (!data.lyrics && !data.synced)) {
       lbody.innerHTML = '<div class="empty-hint">No lyrics available</div>';
+      return;
+    }
+    var parsed = data.synced ? parseLrc(data.synced) : null;
+    if (parsed && parsed.length > 0) {
+      state.syncedLyrics = parsed;
+      renderSyncedLyrics(parsed);
+    } else {
+      lbody.innerHTML = "<p>" + escapeHtml(data.lyrics).replace(/\n/g, "<br>") + "</p>";
     }
   });
+}
+
+/* Parses standard LRC format ("[mm:ss.xx]line text" per line) into an
+   array of {time, text} — this is what lrclib's "synced" field returns. */
+function parseLrc(lrc) {
+  var lines = lrc.split("\n");
+  var out = [];
+  var re = /\[(\d{2}):(\d{2})(?:\.(\d{1,2}))?\]/;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var m = re.exec(line);
+    if (!m) continue;
+    var minutes = parseInt(m[1], 10);
+    var seconds = parseInt(m[2], 10);
+    var centis = m[3] ? parseInt((m[3] + "00").slice(0, 2), 10) : 0;
+    var time = minutes * 60 + seconds + centis / 100;
+    var text = line.replace(re, "").replace(/^\s+|\s+$/g, "");
+    out.push({ time: time, text: text });
+  }
+  return out;
+}
+
+function renderSyncedLyrics(parsed) {
+  var lbody = document.getElementById("lbody");
+  var html = "";
+  for (var i = 0; i < parsed.length; i++) {
+    html += '<p class="lrc-line" id="lrc-' + i + '">' + escapeHtml(parsed[i].text || "\u266A") + "</p>";
+  }
+  lbody.innerHTML = html;
+}
+
+/* Called from the audio timeupdate handler — highlights whichever LRC line
+   is currently playing and scrolls it into view, karaoke-style. */
+function updateSyncedLyricsHighlight() {
+  if (!state.syncedLyrics || !audioEl) return;
+  var t = audioEl.currentTime;
+  var activeIdx = -1;
+  for (var i = 0; i < state.syncedLyrics.length; i++) {
+    if (state.syncedLyrics[i].time <= t) {
+      activeIdx = i;
+    } else {
+      break;
+    }
+  }
+  if (activeIdx === state.lastLyricLineIdx) return;
+  state.lastLyricLineIdx = activeIdx;
+
+  var prevEl = document.getElementById("lrc-" + state.prevActiveLyricIdx);
+  if (prevEl) prevEl.className = "lrc-line";
+  var el = document.getElementById("lrc-" + activeIdx);
+  if (el) {
+    el.className = "lrc-line active";
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  state.prevActiveLyricIdx = activeIdx;
 }
 
 function closeRpanel() {
